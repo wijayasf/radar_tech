@@ -1,0 +1,9 @@
+# Rust build output
+/target
+
+# Local secrets and runtime state
+.env
+processed_urls.txt
+
+# macOS metadata
+.DS_Store

@@ -1,0 +1,56 @@
+name: Tech Radar
+
+on:
+  schedule:
+    # 08:00 WIB is 01:00 UTC.
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+jobs:
+  run-tech-radar:
+    runs-on: ubuntu-latest
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Restore processed URL history
+        uses: actions/cache/restore@v4
+        with:
+          path: processed_urls.txt
+          key: processed-urls-${{ github.run_id }}
+          restore-keys: |
+            processed-urls-
+
+      - name: Ensure processed URL file exists
+        run: touch processed_urls.txt
+
+      - name: Run tech radar
+        run: cargo run --locked
+
+      - name: Save processed URL history
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: processed_urls.txt
+          key: processed-urls-${{ github.run_id }}
