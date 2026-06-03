@@ -9,7 +9,8 @@ use async_openai::{
 use chrono::{Datelike, Local, Weekday};
 use dotenv::dotenv;
 use reqwest::Client as HttpClient;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_json::{Value, json};
 use std::{
     collections::HashSet,
     env, fs,
@@ -21,7 +22,6 @@ use tokio::time::{Duration, sleep};
 const PROCESSED_URLS_FILE: &str = "processed_urls.txt";
 const ARTICLE_TEXT_LIMIT: usize = 5_000;
 const MAX_ARTICLES_PER_SESSION: usize = 8;
-const DISCORD_MESSAGE_LIMIT: usize = 1_900;
 const FEED_DELAY_SECONDS: u64 = 2;
 const OPENAI_DELAY_SECONDS: u64 = 5;
 const CERTIFICATION_WEEKDAY: Weekday = Weekday::Mon;
@@ -94,11 +94,6 @@ where
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-#[derive(Serialize)]
-struct DiscordMessage {
-    content: String,
-}
-
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -169,9 +164,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let summary = summarize_articles_one_by_one(&openai_api_key, &new_articles).await?;
-    let discord_message = format_discord_message(&summary);
+    let discord_embeds = format_discord_message(&summary);
 
-    send_to_discord(&http_client, &discord_webhook_url, &discord_message).await?;
+    send_to_discord(&http_client, &discord_webhook_url, &discord_embeds).await?;
     append_processed_urls(PROCESSED_URLS_FILE, &new_articles)?;
 
     println!(
@@ -463,35 +458,41 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     truncated
 }
 
-fn format_discord_message(summary: &CategorizedSummary) -> String {
-    let mut message = format!(
-        "**Agentic AI**\n{}\n\n**Architecture AI**\n{}\n\n**Programming**\n{}\n\n**Tech Update**\n{}",
-        format_points(&summary.agentic_ai),
-        format_points(&summary.architecture_ai),
-        format_points(&summary.programming),
-        format_points(&summary.tech_update)
-    );
+fn format_discord_message(summary: &CategorizedSummary) -> Vec<Value> {
+    let mut categories = vec![
+        ("Agentic AI", &summary.agentic_ai),
+        ("Cloud Architecture", &summary.architecture_ai),
+        ("Programming", &summary.programming),
+        ("Tech Updates", &summary.tech_update),
+    ];
 
     if Local::now().weekday() == Weekday::Mon {
-        message.push_str(&format!(
-            "\n\n**Certifications**\n{}",
-            format_points(&summary.certifications)
-        ));
+        categories.push(("Certifications", &summary.certifications));
     }
 
-    truncate_discord_message(&message, DISCORD_MESSAGE_LIMIT)
+    categories
+        .into_iter()
+        .map(|(category_name, articles)| {
+            json!({
+                "title": format!("📰 LINE TECH NEWS | {category_name}"),
+                "color": category_color(category_name),
+                "description": format_embed_description(articles),
+                "footer": {
+                    "text": "Tech Radar • Morning Digest"
+                }
+            })
+        })
+        .collect()
 }
 
-fn truncate_discord_message(message: &str, max_chars: usize) -> String {
-    if message.chars().count() <= max_chars {
-        return message.to_string();
+fn category_color(category_name: &str) -> u32 {
+    match category_name {
+        "Agentic AI" => 46_714,
+        "Cloud Architecture" => 39_423,
+        "Programming" => 10_182_117,
+        "Tech Updates" => 15_817_653,
+        _ => 16_777_215,
     }
-
-    let suffix = "...(pesan dipotong karena terlalu panjang)";
-    let take_chars = max_chars.saturating_sub(suffix.chars().count());
-    let mut truncated = message.chars().take(take_chars).collect::<String>();
-    truncated.push_str(suffix);
-    truncated
 }
 
 fn strip_json_code_fence(value: &str) -> String {
@@ -504,20 +505,20 @@ fn strip_json_code_fence(value: &str) -> String {
         .to_string()
 }
 
-fn format_points(points: &[ArticleInfo]) -> String {
+fn format_embed_description(points: &[ArticleInfo]) -> String {
     if points.is_empty() {
-        return "- Tidak ada artikel baru yang relevan.".to_string();
+        return "Tidak ada artikel baru yang relevan.".to_string();
     }
 
     points
         .iter()
         .take(2)
-        .map(format_article_point)
+        .map(format_embed_article_item)
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n\n")
 }
 
-fn format_article_point(article: &ArticleInfo) -> String {
+fn format_embed_article_item(article: &ArticleInfo) -> String {
     let title = if article.title.trim().is_empty() {
         let summary_fallback = article.summary.trim();
 
@@ -531,21 +532,27 @@ fn format_article_point(article: &ArticleInfo) -> String {
     };
 
     if article.url.trim().is_empty() {
-        format!("- **{title}**")
+        format!("➡️ **{title}**")
     } else {
-        format!("- **{title}** - [Baca]({})", article.url.trim())
+        format!(
+            "➡️ **{title}** - [Read Article]({})",
+            sanitize_markdown_url(&article.url)
+        )
     }
+}
+
+fn sanitize_markdown_url(url: &str) -> String {
+    url.trim().replace('(', "%28").replace(')', "%29")
 }
 
 async fn send_to_discord(
     http_client: &HttpClient,
     webhook_url: &str,
-    content: &str,
+    embeds: &[Value],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let message = DiscordMessage {
-        content: content.to_string(),
-    };
-    let payload = serde_json::to_string(&message)?;
+    let payload = serde_json::to_string(&json!({
+        "embeds": embeds
+    }))?;
 
     let response = http_client
         .post(webhook_url)
