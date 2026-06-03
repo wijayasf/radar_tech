@@ -2,8 +2,8 @@ name: Tech Radar
 
 on:
   schedule:
-    # 08:00 WIB is 01:00 UTC.
-    - cron: "0 1 * * *"
+    # 08:15 WIB is 01:15 UTC.
+    - cron: "15 1 * * *"
   workflow_dispatch:
 
 jobs:
@@ -34,23 +34,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Restore processed URL history
-        uses: actions/cache/restore@v4
+      - name: Cache processed URL history
+        uses: actions/cache@v4
         with:
           path: processed_urls.txt
-          key: processed-urls-${{ github.run_id }}
+          key: processed-urls-${{ github.database_id }}
           restore-keys: |
-            processed-urls-
+            processed-urls-${{ github.database_id }}
 
       - name: Ensure processed URL file exists
         run: touch processed_urls.txt
 
       - name: Run tech radar
         run: cargo run --locked
-
-      - name: Save processed URL history
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: processed_urls.txt
-          key: processed-urls-${{ github.run_id }}
