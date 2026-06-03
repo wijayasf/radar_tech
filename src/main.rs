@@ -25,7 +25,7 @@ const MAX_ARTICLES_PER_SESSION: usize = 8;
 const FEED_DELAY_SECONDS: u64 = 2;
 const OPENAI_DELAY_SECONDS: u64 = 5;
 const CERTIFICATION_WEEKDAY: Weekday = Weekday::Mon;
-const OPENAI_SYSTEM_PROMPT: &str = r#"Anda adalah analis teknologi. Ringkaslah artikel-artikel berikut ke dalam format JSON dengan tepat 5 kunci: "agentic_ai" (arsitektur/tren agen AI), "architecture_ai" (arsitektur AI baru), "programming" (bug dan update versi), "tech_update" (update teknologi umum: AI, cloud, dan programming), dan "certifications" (ujian, pelatihan, voucher, atau program sertifikasi). Setiap kategori harus berisi array objek dengan struktur {"title": "...", "summary": "...", "url": "..."}. Untuk agentic_ai, architecture_ai, programming, dan tech_update, berikan maksimal 2 artikel jika tersedia. Untuk certifications, hanya isi jika artikel membahas ujian, pelatihan, voucher, cohort, program belajar, atau sertifikasi yang relevan dengan region ASEAN/Indonesia; jika tidak relevan, gunakan array kosong. Contoh format: {"agentic_ai":[{"title":"...","summary":"...","url":"..."}],"architecture_ai":[{"title":"...","summary":"...","url":"..."}],"programming":[{"title":"...","summary":"...","url":"..."}],"tech_update":[{"title":"...","summary":"...","url":"..."}],"certifications":[{"title":"...","summary":"...","url":"..."}]}. Gunakan URL artikel asli yang diberikan. Jangan sertakan teks lain selain JSON tersebut."#;
+const OPENAI_SYSTEM_PROMPT: &str = r#"Anda adalah analis teknologi. Ringkaslah artikel-artikel berikut ke dalam format JSON dengan tepat 6 kunci: "agentic_ai" (arsitektur/tren agen AI), "architecture_ai" (arsitektur AI baru), "programming" (bug dan update versi), "tech_update" (update teknologi umum: AI, cloud, dan programming), "creator_insights" (insight praktis, case study, atau kurasi dari creator teknologi), dan "certifications" (ujian, pelatihan, voucher, atau program sertifikasi). Setiap kategori harus berisi array objek dengan struktur {"title": "...", "summary": "...", "url": "..."}. Untuk agentic_ai, architecture_ai, programming, tech_update, dan creator_insights, berikan maksimal 2 artikel jika tersedia. Untuk certifications, hanya isi jika artikel membahas ujian, pelatihan, voucher, cohort, program belajar, atau sertifikasi yang relevan dengan region ASEAN/Indonesia; jika tidak relevan, gunakan array kosong. Contoh format: {"agentic_ai":[{"title":"...","summary":"...","url":"..."}],"architecture_ai":[{"title":"...","summary":"...","url":"..."}],"programming":[{"title":"...","summary":"...","url":"..."}],"tech_update":[{"title":"...","summary":"...","url":"..."}],"creator_insights":[{"title":"...","summary":"...","url":"..."}],"certifications":[{"title":"...","summary":"...","url":"..."}]}. Gunakan URL artikel asli yang diberikan. Jangan sertakan teks lain selain JSON tersebut."#;
 
 #[derive(Debug, Clone)]
 struct Article {
@@ -45,6 +45,8 @@ struct CategorizedSummary {
     programming: Vec<ArticleInfo>,
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
     tech_update: Vec<ArticleInfo>,
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
+    creator_insights: Vec<ArticleInfo>,
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
     certifications: Vec<ArticleInfo>,
 }
@@ -66,6 +68,7 @@ impl CategorizedSummary {
             architecture_ai: Vec::new(),
             programming: Vec::new(),
             tech_update: Vec::new(),
+            creator_insights: Vec::new(),
             certifications: Vec::new(),
         }
     }
@@ -75,6 +78,7 @@ impl CategorizedSummary {
         self.architecture_ai.extend(other.architecture_ai);
         self.programming.extend(other.programming);
         self.tech_update.extend(other.tech_update);
+        self.creator_insights.extend(other.creator_insights);
         self.certifications.extend(other.certifications);
     }
 }
@@ -464,25 +468,39 @@ fn format_discord_message(summary: &CategorizedSummary) -> Vec<Value> {
         ("Cloud Architecture", &summary.architecture_ai),
         ("Programming", &summary.programming),
         ("Tech Updates", &summary.tech_update),
+        ("Creator Insights", &summary.creator_insights),
     ];
 
     if Local::now().weekday() == Weekday::Mon {
         categories.push(("Certifications", &summary.certifications));
     }
 
-    categories
-        .into_iter()
-        .map(|(category_name, articles)| {
-            json!({
-                "title": format!("📰 LINE TECH NEWS | {category_name}"),
-                "color": category_color(category_name),
-                "description": format_embed_description(articles),
-                "footer": {
-                    "text": "Tech Radar • Morning Digest"
-                }
-            })
-        })
-        .collect()
+    let mut embeds = Vec::new();
+
+    for (category_name, articles) in categories {
+        let is_creator_insights = category_name == "Creator Insights";
+        let description = if is_creator_insights {
+            format_creator_threads_description(articles)
+        } else {
+            format_embed_description(articles)
+        };
+        let footer_text = if is_creator_insights {
+            "Tech Radar • Creator Insights Digest"
+        } else {
+            "Tech Radar • Morning Digest"
+        };
+
+        embeds.push(json!({
+            "title": format!("📰 LINE TECH NEWS | {category_name}"),
+            "color": category_color(category_name),
+            "description": description,
+            "footer": {
+                "text": footer_text
+            }
+        }));
+    }
+
+    embeds
 }
 
 fn category_color(category_name: &str) -> u32 {
@@ -491,6 +509,7 @@ fn category_color(category_name: &str) -> u32 {
         "Cloud Architecture" => 39_423,
         "Programming" => 10_182_117,
         "Tech Updates" => 15_817_653,
+        "Creator Insights" => 16_763_904,
         _ => 16_777_215,
     }
 }
@@ -538,6 +557,49 @@ fn format_embed_article_item(article: &ArticleInfo) -> String {
             "➡️ **{title}** - [Read Article]({})",
             sanitize_markdown_url(&article.url)
         )
+    }
+}
+
+fn format_creator_threads_description(points: &[ArticleInfo]) -> String {
+    if points.is_empty() {
+        return "Tidak ada thread baru yang relevan.".to_string();
+    }
+
+    points
+        .iter()
+        .take(2)
+        .map(format_creator_thread_item)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_creator_thread_item(article: &ArticleInfo) -> String {
+    let raw_post_content = article.summary.trim();
+    let hook_source = first_line_or_sentence(raw_post_content);
+    let hook = hook_source.chars().take(60).collect::<String>();
+    let hook = if hook.trim().is_empty() {
+        "Creator insight tanpa hook"
+    } else {
+        hook.trim()
+    };
+
+    if article.url.trim().is_empty() {
+        format!("➡️ **{hook}...**")
+    } else {
+        format!(
+            "➡️ **{hook}...** - [Read Thread]({})",
+            sanitize_markdown_url(&article.url)
+        )
+    }
+}
+
+fn first_line_or_sentence(value: &str) -> &str {
+    let trimmed = value.trim();
+    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
+
+    match first_line.find('.') {
+        Some(sentence_end) if sentence_end > 0 => first_line[..sentence_end].trim(),
+        _ => first_line,
     }
 }
 
