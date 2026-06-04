@@ -1,6 +1,6 @@
 name: Tech Radar Scheduler
 
-"on":
+on:
   workflow_dispatch:
   schedule:
     # temporary scheduler validation
