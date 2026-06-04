@@ -1,0 +1,14 @@
+name: Schedule Test
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  print-utc-time:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Print current UTC time
+        run: date -u
