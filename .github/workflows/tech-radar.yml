@@ -1,11 +1,11 @@
 name: Tech Radar Scheduler
 
 on:
+  workflow_dispatch:
   schedule:
     # temporary scheduler validation
     # 12:00 WIB is 05:00 UTC.
     - cron: "*/5 * * * *"
-  workflow_dispatch:
 
 jobs:
   run-tech-radar:
