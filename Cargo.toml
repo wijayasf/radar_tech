@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-openai = { version = "0.40.3", features = ["chat-completion"] }
 chrono = "0.4.44"
 dotenv = "0.15.0"
 reqwest = { version = "0.13.4", features = ["json"] }

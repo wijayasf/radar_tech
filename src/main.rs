@@ -102,11 +102,14 @@ async fn main() {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Workflow started");
+
     let openai_api_key = read_env("OPENAI_API_KEY")?;
     let discord_webhook_url = read_env("DISCORD_WEBHOOK_URL")?;
     let processed_urls = read_processed_urls(PROCESSED_URLS_FILE)?;
     let http_client = HttpClient::new();
 
+    let mut collected_articles_count = 0usize;
     let mut new_articles = Vec::new();
 
     let mut feeds = rss_feeds();
@@ -125,6 +128,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         match fetch_rss_feed(&http_client, feed_url).await {
             Ok(feed_content) => {
                 let articles = parse_feed_articles(feed_url, &feed_content);
+                collected_articles_count += articles.len();
 
                 for article in articles {
                     if processed_urls.contains(&article.url) {
@@ -155,16 +159,47 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    println!("Number of collected articles: {collected_articles_count}");
+    println!("Number of filtered articles: {}", new_articles.len());
+
     if new_articles.is_empty() {
         println!("Tidak ada artikel baru untuk diproses.");
+        match send_discord_text(
+            &http_client,
+            &discord_webhook_url,
+            "✅ Tech Radar test successful — workflow executed, but no new relevant updates were found.",
+        )
+        .await
+        {
+            Ok(()) => println!("Discord delivery success"),
+            Err(error) => {
+                eprintln!("Discord delivery failed: {error}");
+                return Err(error);
+            }
+        }
         return Ok(());
     }
 
     let summary =
-        summarize_articles_one_by_one(&http_client, &openai_api_key, &new_articles).await?;
+        match summarize_articles_one_by_one(&http_client, &openai_api_key, &new_articles).await {
+            Ok(summary) => {
+                println!("OpenAI analysis success");
+                summary
+            }
+            Err(error) => {
+                eprintln!("OpenAI analysis failure: {error}");
+                return Err(error);
+            }
+        };
     let discord_embeds = format_discord_message(&summary);
 
-    send_to_discord(&http_client, &discord_webhook_url, &discord_embeds).await?;
+    match send_to_discord(&http_client, &discord_webhook_url, &discord_embeds).await {
+        Ok(()) => println!("Discord delivery success"),
+        Err(error) => {
+            eprintln!("Discord delivery failed: {error}");
+            return Err(error);
+        }
+    }
     append_processed_urls(PROCESSED_URLS_FILE, &new_articles)?;
 
     println!(
@@ -383,14 +418,14 @@ fn clean_text(value: &str) -> String {
 }
 
 async fn summarize_articles_one_by_one(
+    http_client: &HttpClient,
     openai_api_key: &str,
     articles: &[Article],
 ) -> Result<CategorizedSummary, Box<dyn std::error::Error>> {
-    let client = OpenAIClient::with_config(OpenAIConfig::new().with_api_key(openai_api_key));
     let mut combined_summary = CategorizedSummary::empty();
 
     for (index, article) in articles.iter().enumerate() {
-        let summary = summarize_article(&client, article).await?;
+        let summary = summarize_article(http_client, openai_api_key, article).await?;
         combined_summary.merge(summary);
 
         if index + 1 < articles.len() {
@@ -402,31 +437,38 @@ async fn summarize_articles_one_by_one(
 }
 
 async fn summarize_article(
-    client: &OpenAIClient<OpenAIConfig>,
+    http_client: &HttpClient,
+    openai_api_key: &str,
     article: &Article,
 ) -> Result<CategorizedSummary, Box<dyn std::error::Error>> {
     let prompt = build_article_prompt(article);
+    let request = json!({
+        "model": "gpt-4o",
+        "instructions": OPENAI_SYSTEM_PROMPT,
+        "input": prompt,
+        "text": {
+            "format": {
+                "type": "json_object"
+            }
+        }
+    });
 
-    let request = CreateChatCompletionRequestArgs::default()
-        .model("gpt-4o")
-        .messages([
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(OPENAI_SYSTEM_PROMPT)
-                .build()?
-                .into(),
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt)
-                .build()?
-                .into(),
-        ])
-        .build()?;
+    let response = http_client
+        .post(OPENAI_RESPONSES_URL)
+        .bearer_auth(openai_api_key)
+        .json(&request)
+        .send()
+        .await?;
+    let status = response.status();
+    let response_body = response.text().await?;
 
-    let response = client.chat().create(request).await?;
-    let raw_summary_json = response
-        .choices
-        .first()
-        .and_then(|choice| choice.message.content.clone())
-        .ok_or("OpenAI tidak mengembalikan ringkasan.")?;
+    if !status.is_success() {
+        return Err(format!("OpenAI Responses API error {status}: {response_body}").into());
+    }
+
+    let response_json: Value = serde_json::from_str(&response_body)?;
+    let raw_summary_json = extract_openai_response_text(&response_json)
+        .ok_or("OpenAI Responses API tidak mengembalikan output teks.")?;
 
     println!("Raw JSON dari AI: {}", &raw_summary_json);
 
@@ -434,6 +476,32 @@ async fn summarize_article(
     let summary: CategorizedSummary = serde_json::from_str(&cleaned_json)?;
 
     Ok(summary)
+}
+
+fn extract_openai_response_text(response: &Value) -> Option<String> {
+    if let Some(output_text) = response.get("output_text").and_then(Value::as_str) {
+        return Some(output_text.to_string());
+    }
+
+    let mut text_parts = Vec::new();
+
+    for output_item in response.get("output")?.as_array()? {
+        let Some(content_items) = output_item.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+
+        for content_item in content_items {
+            if let Some(text) = content_item.get("text").and_then(Value::as_str) {
+                text_parts.push(text);
+            }
+        }
+    }
+
+    if text_parts.is_empty() {
+        None
+    } else {
+        Some(text_parts.join(""))
+    }
 }
 
 fn build_article_prompt(article: &Article) -> String {
@@ -620,6 +688,33 @@ async fn send_to_discord(
     if !response.status().is_success() {
         return Err(format!(
             "Gagal mengirim ringkasan ke Discord. Status HTTP: {}",
+            response.status()
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+async fn send_discord_text(
+    http_client: &HttpClient,
+    webhook_url: &str,
+    content: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let payload = serde_json::to_string(&json!({
+        "content": content
+    }))?;
+
+    let response = http_client
+        .post(webhook_url)
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Gagal mengirim pesan fallback ke Discord. Status HTTP: {}",
             response.status()
         )
         .into());

@@ -2,8 +2,8 @@ name: Tech Radar
 
 on:
   schedule:
-    # 08:15 WIB is 01:15 UTC.
-    - cron: "15 1 * * *"
+    # 12:00 WIB is 05:00 UTC.
+    - cron: "0 5 * * *"
   workflow_dispatch:
 
 jobs:
