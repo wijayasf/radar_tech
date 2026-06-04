@@ -13,15 +13,44 @@ use tokio::time::{Duration, sleep};
 
 const PROCESSED_URLS_FILE: &str = "processed_urls.txt";
 const ARTICLE_TEXT_LIMIT: usize = 5_000;
-const MAX_ARTICLES_PER_SESSION: usize = 8;
-const FEED_DELAY_SECONDS: u64 = 2;
-const OPENAI_DELAY_SECONDS: u64 = 5;
+const MAX_ARTICLES_PER_SESSION: usize = 30;
+const MIN_ARTICLES_PER_CATEGORY: usize = 3;
+const MAX_ARTICLES_PER_CATEGORY: usize = 5;
+const SOURCE_DELAY_SECONDS: u64 = 2;
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
-const CERTIFICATION_WEEKDAY: Weekday = Weekday::Mon;
-const OPENAI_SYSTEM_PROMPT: &str = r#"Anda adalah analis teknologi. Ringkaslah artikel-artikel berikut ke dalam format JSON dengan tepat 6 kunci: "agentic_ai" (arsitektur/tren agen AI), "architecture_ai" (arsitektur AI baru), "programming" (bug dan update versi), "tech_update" (update teknologi umum: AI, cloud, dan programming), "creator_insights" (insight praktis, case study, atau kurasi dari creator teknologi), dan "certifications" (ujian, pelatihan, voucher, atau program sertifikasi). Setiap kategori harus berisi array objek dengan struktur {"title": "...", "summary": "...", "url": "..."}. Untuk agentic_ai, architecture_ai, programming, tech_update, dan creator_insights, berikan maksimal 2 artikel jika tersedia. Untuk certifications, hanya isi jika artikel membahas ujian, pelatihan, voucher, cohort, program belajar, atau sertifikasi yang relevan dengan region ASEAN/Indonesia; jika tidak relevan, gunakan array kosong. Contoh format: {"agentic_ai":[{"title":"...","summary":"...","url":"..."}],"architecture_ai":[{"title":"...","summary":"...","url":"..."}],"programming":[{"title":"...","summary":"...","url":"..."}],"tech_update":[{"title":"...","summary":"...","url":"..."}],"creator_insights":[{"title":"...","summary":"...","url":"..."}],"certifications":[{"title":"...","summary":"...","url":"..."}]}. Gunakan URL artikel asli yang diberikan. Jangan sertakan teks lain selain JSON tersebut."#;
+const OPENAI_SYSTEM_PROMPT: &str = r#"Anda adalah analis teknologi untuk Innovation Engineer. Analisis semua artikel yang diberikan sebagai satu batch, lalu kembalikan JSON saja.
+
+Kategori JSON wajib: "agentic_ai", "architecture_ai", "programming", "tech_update", "creator_insights", dan "certifications".
+
+Setiap kategori harus berupa objek:
+{
+  "summary": "ringkasan eksekutif singkat yang mensintesis artikel teratas",
+  "key_themes": ["tema 1", "tema 2", "tema 3"],
+  "articles": [
+    {
+      "title": "...",
+      "source": "...",
+      "url": "...",
+      "why_this_matters": "1 kalimat kenapa ini penting",
+      "strategic_implication": "opsional: implikasi untuk Innovation Engineer"
+    }
+  ]
+}
+
+Ranking dan filtering:
+- Prioritaskan relevansi terhadap Agentic AI, MCP, AI engineering, Enterprise AI, LLM tooling, RAG, evaluation, AI infrastructure, cloud architecture, dan developer productivity.
+- Urutkan berdasarkan relevansi AI/engineering, freshness, kualitas sumber, dan strategic importance untuk Innovation Engineer.
+- Targetkan 5 artikel per kategori.
+- Jika hanya tersedia 3 atau 4 artikel relevan, kembalikan 3 atau 4.
+- Jika kategori memiliki kurang dari 3 artikel relevan, kembalikan "articles": [], "summary": "", dan "key_themes": [].
+- Jangan dump judul RSS mentah; sintetis dan ranking konten.
+- Untuk certifications, isi hanya jika ada ujian, pelatihan, voucher, cohort, program belajar, atau sertifikasi yang relevan dengan ASEAN/Indonesia.
+- Gunakan URL dan source asli dari input.
+- Jangan sertakan teks lain selain JSON."#;
 
 #[derive(Debug, Clone)]
 struct Article {
+    source_name: String,
     source_feed: String,
     title: String,
     url: String,
@@ -30,18 +59,28 @@ struct Article {
 
 #[derive(Debug, Deserialize)]
 struct CategorizedSummary {
+    #[serde(default, deserialize_with = "deserialize_null_object_as_default")]
+    agentic_ai: CategoryDigest,
+    #[serde(default, deserialize_with = "deserialize_null_object_as_default")]
+    architecture_ai: CategoryDigest,
+    #[serde(default, deserialize_with = "deserialize_null_object_as_default")]
+    programming: CategoryDigest,
+    #[serde(default, deserialize_with = "deserialize_null_object_as_default")]
+    tech_update: CategoryDigest,
+    #[serde(default, deserialize_with = "deserialize_null_object_as_default")]
+    creator_insights: CategoryDigest,
+    #[serde(default, deserialize_with = "deserialize_null_object_as_default")]
+    certifications: CategoryDigest,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CategoryDigest {
+    #[serde(default, deserialize_with = "deserialize_null_string_as_default")]
+    summary: String,
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
-    agentic_ai: Vec<ArticleInfo>,
+    key_themes: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_null_as_default")]
-    architecture_ai: Vec<ArticleInfo>,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
-    programming: Vec<ArticleInfo>,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
-    tech_update: Vec<ArticleInfo>,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
-    creator_insights: Vec<ArticleInfo>,
-    #[serde(default, deserialize_with = "deserialize_null_as_default")]
-    certifications: Vec<ArticleInfo>,
+    articles: Vec<ArticleInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,31 +88,13 @@ struct ArticleInfo {
     #[serde(default, deserialize_with = "deserialize_null_string_as_default")]
     title: String,
     #[serde(default, deserialize_with = "deserialize_null_string_as_default")]
-    summary: String,
+    source: String,
     #[serde(default, deserialize_with = "deserialize_null_string_as_default")]
     url: String,
-}
-
-impl CategorizedSummary {
-    fn empty() -> Self {
-        Self {
-            agentic_ai: Vec::new(),
-            architecture_ai: Vec::new(),
-            programming: Vec::new(),
-            tech_update: Vec::new(),
-            creator_insights: Vec::new(),
-            certifications: Vec::new(),
-        }
-    }
-
-    fn merge(&mut self, other: CategorizedSummary) {
-        self.agentic_ai.extend(other.agentic_ai);
-        self.architecture_ai.extend(other.architecture_ai);
-        self.programming.extend(other.programming);
-        self.tech_update.extend(other.tech_update);
-        self.creator_insights.extend(other.creator_insights);
-        self.certifications.extend(other.certifications);
-    }
+    #[serde(default, deserialize_with = "deserialize_null_string_as_default")]
+    why_this_matters: String,
+    #[serde(default, deserialize_with = "deserialize_null_string_as_default")]
+    strategic_implication: String,
 }
 
 fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
@@ -89,6 +110,14 @@ where
     D: serde::Deserializer<'de>,
 {
     Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_null_object_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[tokio::main]
@@ -109,53 +138,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let processed_urls = read_processed_urls(PROCESSED_URLS_FILE)?;
     let http_client = HttpClient::new();
 
-    let mut collected_articles_count = 0usize;
+    let collected_articles = collect_source_articles(&http_client).await?;
+    let collected_articles_count = collected_articles.len();
     let mut new_articles = Vec::new();
 
-    let mut feeds = rss_feeds();
-
-    if should_check_certifications() {
-        println!("Hari sertifikasi aktif. Feed sertifikasi akan diproses.");
-        feeds.extend(certification_rss_feeds());
-    } else {
-        println!(
-            "Bukan hari sertifikasi ({:?}). Feed sertifikasi dilewati.",
-            CERTIFICATION_WEEKDAY
-        );
-    }
-
-    for (index, feed_url) in feeds.iter().enumerate() {
-        match fetch_rss_feed(&http_client, feed_url).await {
-            Ok(feed_content) => {
-                let articles = parse_feed_articles(feed_url, &feed_content);
-                collected_articles_count += articles.len();
-
-                for article in articles {
-                    if processed_urls.contains(&article.url) {
-                        println!("Lewati artikel yang sudah diproses: {}", article.url);
-                        continue;
-                    }
-
-                    new_articles.push(article);
-
-                    if new_articles.len() >= MAX_ARTICLES_PER_SESSION {
-                        println!(
-                            "Batas {} artikel baru per sesi tercapai.",
-                            MAX_ARTICLES_PER_SESSION
-                        );
-                        break;
-                    }
-                }
-            }
-            Err(error) => eprintln!("Feed dilewati karena gagal fetch: {feed_url} ({error})"),
+    for article in collected_articles {
+        if processed_urls.contains(&article.url) {
+            println!(
+                "Lewati artikel yang sudah diproses dari {}: {}",
+                article.source_name, article.url
+            );
+            continue;
         }
+
+        new_articles.push(article);
 
         if new_articles.len() >= MAX_ARTICLES_PER_SESSION {
+            println!(
+                "Batas {} artikel baru per sesi tercapai.",
+                MAX_ARTICLES_PER_SESSION
+            );
             break;
-        }
-
-        if index + 1 < feeds.len() {
-            sleep(Duration::from_secs(FEED_DELAY_SECONDS)).await;
         }
     }
 
@@ -171,32 +174,82 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await
         {
-            Ok(()) => println!("Discord delivery success"),
+            Ok(()) => {
+                println!("Discord delivery success");
+                log_final_summary(collected_articles_count, new_articles.len(), 0, "success");
+            }
             Err(error) => {
                 eprintln!("Discord delivery failed: {error}");
+                log_final_summary(collected_articles_count, new_articles.len(), 0, "failed");
                 return Err(error);
             }
         }
         return Ok(());
     }
 
-    let summary =
-        match summarize_articles_one_by_one(&http_client, &openai_api_key, &new_articles).await {
-            Ok(summary) => {
-                println!("OpenAI analysis success");
-                summary
-            }
-            Err(error) => {
-                eprintln!("OpenAI analysis failure: {error}");
-                return Err(error);
-            }
-        };
+    let summary = match summarize_articles(&http_client, &openai_api_key, &new_articles).await {
+        Ok(summary) => {
+            println!("OpenAI analysis success");
+            summary
+        }
+        Err(error) => {
+            eprintln!("OpenAI analysis failure: {error}");
+            return Err(error);
+        }
+    };
     let discord_embeds = format_discord_message(&summary);
 
+    if discord_embeds.is_empty() {
+        println!("No category reached minimum relevance threshold.");
+        match send_discord_text(
+            &http_client,
+            &discord_webhook_url,
+            "✅ Tech Radar test successful — workflow executed, but no category had at least 3 relevant updates.",
+        )
+        .await
+        {
+            Ok(()) => {
+                println!("Discord delivery success");
+                log_final_summary(
+                    collected_articles_count,
+                    new_articles.len(),
+                    new_articles.len(),
+                    "success",
+                );
+            }
+            Err(error) => {
+                eprintln!("Discord delivery failed: {error}");
+                log_final_summary(
+                    collected_articles_count,
+                    new_articles.len(),
+                    new_articles.len(),
+                    "failed",
+                );
+                return Err(error);
+            }
+        }
+        append_processed_urls(PROCESSED_URLS_FILE, &new_articles)?;
+        return Ok(());
+    }
+
     match send_to_discord(&http_client, &discord_webhook_url, &discord_embeds).await {
-        Ok(()) => println!("Discord delivery success"),
+        Ok(()) => {
+            println!("Discord delivery success");
+            log_final_summary(
+                collected_articles_count,
+                new_articles.len(),
+                new_articles.len(),
+                "success",
+            );
+        }
         Err(error) => {
             eprintln!("Discord delivery failed: {error}");
+            log_final_summary(
+                collected_articles_count,
+                new_articles.len(),
+                new_articles.len(),
+                "failed",
+            );
             return Err(error);
         }
     }
@@ -210,26 +263,193 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn rss_feeds() -> Vec<String> {
+async fn collect_source_articles(
+    http_client: &HttpClient,
+) -> Result<Vec<Article>, Box<dyn std::error::Error>> {
+    let mut articles = Vec::new();
+
+    articles.extend(collect_hacker_news(http_client).await);
+
+    let rss_sources = rss_sources();
+
+    for (index, source) in rss_sources.iter().enumerate() {
+        let source_articles = collect_rss_source(http_client, source).await;
+        log_source_count(source.name, source_articles.len());
+        articles.extend(source_articles);
+
+        if index + 1 < rss_sources.len() {
+            sleep(Duration::from_secs(SOURCE_DELAY_SECONDS)).await;
+        }
+    }
+
+    articles.extend(collect_github_trending_placeholder());
+    articles.extend(collect_product_hunt_placeholder());
+    articles.extend(collect_every_ai_placeholder());
+
+    Ok(articles)
+}
+
+struct RssSource {
+    name: &'static str,
+    url: &'static str,
+}
+
+fn rss_sources() -> Vec<RssSource> {
     vec![
-        "https://blog.langchain.dev/rss/".to_string(),
-        "https://github.blog/feed".to_string(),
-        "https://security.googleblog.com/feeds/posts/default".to_string(),
-        "https://openai.com/blog/rss.xml".to_string(),
-        "https://techcrunch.com/category/artificial-intelligence/feed".to_string(),
+        RssSource {
+            name: "TLDR AI",
+            url: "https://ai.tldr.tech/rss",
+        },
+        RssSource {
+            name: "The Rundown AI",
+            url: "https://www.therundown.ai/feed",
+        },
+        RssSource {
+            name: "The New Stack",
+            url: "https://thenewstack.io/feed/",
+        },
+        RssSource {
+            name: "InfoQ",
+            url: "https://www.infoq.com/feed/",
+        },
+        RssSource {
+            name: "Lenny's Newsletter",
+            url: "https://www.lennysnewsletter.com/feed",
+        },
     ]
 }
 
-fn certification_rss_feeds() -> Vec<String> {
-    vec![
-        "https://aws.amazon.com/blogs/training-and-certification/feed/".to_string(),
-        "https://cloud.google.com/blog/topics/training-certifications/rss.xml".to_string(),
-        "https://www.dicoding.com/blog/feed/".to_string(),
-    ]
+async fn collect_hacker_news(http_client: &HttpClient) -> Vec<Article> {
+    const SOURCE_NAME: &str = "Hacker News";
+    const TOP_STORIES_URL: &str = "https://hacker-news.firebaseio.com/v0/topstories.json";
+    const ITEM_LIMIT: usize = 10;
+
+    let result = async {
+        let story_ids = http_client
+            .get(TOP_STORIES_URL)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Vec<u64>>()
+            .await?;
+        let mut articles = Vec::new();
+
+        for story_id in story_ids.into_iter().take(ITEM_LIMIT) {
+            let item_url = format!("https://hacker-news.firebaseio.com/v0/item/{story_id}.json");
+            let item = http_client
+                .get(&item_url)
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<HackerNewsItem>()
+                .await?;
+
+            let title = item
+                .title
+                .unwrap_or_else(|| "Untitled Hacker News item".to_string());
+            let url = item
+                .url
+                .unwrap_or_else(|| format!("https://news.ycombinator.com/item?id={story_id}"));
+
+            articles.push(Article {
+                source_name: SOURCE_NAME.to_string(),
+                source_feed: TOP_STORIES_URL.to_string(),
+                title: clean_text(&title),
+                url: clean_text(&url),
+                summary: format!(
+                    "Hacker News top story with score {}.",
+                    item.score.unwrap_or(0)
+                ),
+            });
+        }
+
+        Ok::<Vec<Article>, Box<dyn std::error::Error>>(articles)
+    }
+    .await;
+
+    match result {
+        Ok(articles) => {
+            log_source_count(SOURCE_NAME, articles.len());
+            articles
+        }
+        Err(error) => {
+            log_source_failure(SOURCE_NAME, &error.to_string());
+            Vec::new()
+        }
+    }
 }
 
-fn should_check_certifications() -> bool {
-    Local::now().weekday() == CERTIFICATION_WEEKDAY
+#[derive(Debug, Deserialize)]
+struct HackerNewsItem {
+    title: Option<String>,
+    url: Option<String>,
+    score: Option<u64>,
+}
+
+async fn collect_rss_source(http_client: &HttpClient, source: &RssSource) -> Vec<Article> {
+    match fetch_rss_feed(http_client, source.url).await {
+        Ok(feed_content) => parse_feed_articles(source.name, source.url, &feed_content),
+        Err(error) => {
+            log_source_failure(source.name, &error.to_string());
+            Vec::new()
+        }
+    }
+}
+
+fn collect_github_trending_placeholder() -> Vec<Article> {
+    // TODO: GitHub Trending does not expose a stable official RSS/API endpoint.
+    // Add a small, tested HTML collector only if we accept scraping maintenance risk,
+    // or replace this with a stable third-party feed we explicitly trust.
+    log_source_count("GitHub Trending", 0);
+    Vec::new()
+}
+
+fn collect_product_hunt_placeholder() -> Vec<Article> {
+    // TODO: Product Hunt requires an API token and GraphQL query configuration.
+    // Implement this collector once PRODUCT_HUNT_TOKEN is configured in GitHub
+    // Actions secrets and the selected query shape is locked down.
+    match env::var("PRODUCT_HUNT_TOKEN") {
+        Ok(_) => eprintln!(
+            "Product Hunt collector TODO: PRODUCT_HUNT_TOKEN is set, but API collector is not implemented yet."
+        ),
+        Err(_) => eprintln!("Product Hunt collector skipped: PRODUCT_HUNT_TOKEN is not set."),
+    }
+    log_source_count("Product Hunt", 0);
+    Vec::new()
+}
+
+fn collect_every_ai_placeholder() -> Vec<Article> {
+    // TODO: Every.to documents RSS as a personal subscriber feed, not a stable
+    // public source URL. Add EVERY_AI_RSS_URL support if a user-specific feed is
+    // provided via environment variable.
+    match env::var("EVERY_AI_RSS_URL") {
+        Ok(_) => eprintln!(
+            "Every.to AI collector TODO: EVERY_AI_RSS_URL is set, but private feed support is not implemented yet."
+        ),
+        Err(_) => eprintln!("Every.to AI collector skipped: EVERY_AI_RSS_URL is not set."),
+    }
+    log_source_count("Every.to AI", 0);
+    Vec::new()
+}
+
+fn log_source_count(source_name: &str, count: usize) {
+    println!("{source_name} collected {count} items");
+}
+
+fn log_source_failure(source_name: &str, error: &str) {
+    eprintln!("{source_name} failed: {error}");
+}
+
+fn log_final_summary(
+    total_collected: usize,
+    total_filtered: usize,
+    total_analyzed: usize,
+    discord_status: &str,
+) {
+    println!("Final summary: total collected = {total_collected}");
+    println!("Final summary: total filtered = {total_filtered}");
+    println!("Final summary: total analyzed = {total_analyzed}");
+    println!("Final summary: discord delivery status = {discord_status}");
 }
 
 fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -278,17 +498,17 @@ async fn fetch_rss_feed(
     Ok(response.text().await?)
 }
 
-fn parse_feed_articles(feed_url: &str, feed_content: &str) -> Vec<Article> {
-    let mut articles = parse_rss_items(feed_url, feed_content);
+fn parse_feed_articles(source_name: &str, feed_url: &str, feed_content: &str) -> Vec<Article> {
+    let mut articles = parse_rss_items(source_name, feed_url, feed_content);
 
     if articles.is_empty() {
-        articles = parse_atom_entries(feed_url, feed_content);
+        articles = parse_atom_entries(source_name, feed_url, feed_content);
     }
 
     articles
 }
 
-fn parse_rss_items(feed_url: &str, feed_content: &str) -> Vec<Article> {
+fn parse_rss_items(source_name: &str, feed_url: &str, feed_content: &str) -> Vec<Article> {
     find_blocks(feed_content, "<item", "</item>")
         .into_iter()
         .filter_map(|item| {
@@ -300,6 +520,7 @@ fn parse_rss_items(feed_url: &str, feed_content: &str) -> Vec<Article> {
                 .unwrap_or_default();
 
             Some(Article {
+                source_name: source_name.to_string(),
                 source_feed: feed_url.to_string(),
                 title: clean_text(&title),
                 url: clean_text(&url),
@@ -309,7 +530,7 @@ fn parse_rss_items(feed_url: &str, feed_content: &str) -> Vec<Article> {
         .collect()
 }
 
-fn parse_atom_entries(feed_url: &str, feed_content: &str) -> Vec<Article> {
+fn parse_atom_entries(source_name: &str, feed_url: &str, feed_content: &str) -> Vec<Article> {
     find_blocks(feed_content, "<entry", "</entry>")
         .into_iter()
         .filter_map(|entry| {
@@ -321,6 +542,7 @@ fn parse_atom_entries(feed_url: &str, feed_content: &str) -> Vec<Article> {
                 .unwrap_or_default();
 
             Some(Article {
+                source_name: source_name.to_string(),
                 source_feed: feed_url.to_string(),
                 title: clean_text(&title),
                 url: clean_text(&url),
@@ -417,31 +639,12 @@ fn clean_text(value: &str) -> String {
         .join(" ")
 }
 
-async fn summarize_articles_one_by_one(
+async fn summarize_articles(
     http_client: &HttpClient,
     openai_api_key: &str,
     articles: &[Article],
 ) -> Result<CategorizedSummary, Box<dyn std::error::Error>> {
-    let mut combined_summary = CategorizedSummary::empty();
-
-    for (index, article) in articles.iter().enumerate() {
-        let summary = summarize_article(http_client, openai_api_key, article).await?;
-        combined_summary.merge(summary);
-
-        if index + 1 < articles.len() {
-            sleep(Duration::from_secs(OPENAI_DELAY_SECONDS)).await;
-        }
-    }
-
-    Ok(combined_summary)
-}
-
-async fn summarize_article(
-    http_client: &HttpClient,
-    openai_api_key: &str,
-    article: &Article,
-) -> Result<CategorizedSummary, Box<dyn std::error::Error>> {
-    let prompt = build_article_prompt(article);
+    let prompt = build_articles_prompt(articles);
     let request = json!({
         "model": "gpt-4o",
         "instructions": OPENAI_SYSTEM_PROMPT,
@@ -504,13 +707,24 @@ fn extract_openai_response_text(response: &Value) -> Option<String> {
     }
 }
 
-fn build_article_prompt(article: &Article) -> String {
-    let truncated_summary = truncate_text(&article.summary, ARTICLE_TEXT_LIMIT);
+fn build_articles_prompt(articles: &[Article]) -> String {
+    let mut prompt = String::from("Artikel baru yang perlu dianalisis dan diranking:\n\n");
 
-    format!(
-        "Artikel baru yang perlu dianalisis:\n\nJudul: {}\nURL: {}\nSumber RSS: {}\nCuplikan: {}\n",
-        article.title, article.url, article.source_feed, truncated_summary
-    )
+    for (index, article) in articles.iter().enumerate() {
+        let truncated_summary = truncate_text(&article.summary, ARTICLE_TEXT_LIMIT);
+
+        prompt.push_str(&format!(
+            "{}. Judul: {}\nURL: {}\nSumber: {}\nSumber RSS/API: {}\nCuplikan: {}\n\n",
+            index + 1,
+            article.title,
+            article.url,
+            article.source_name,
+            article.source_feed,
+            truncated_summary
+        ));
+    }
+
+    prompt
 }
 
 fn truncate_text(value: &str, max_chars: usize) -> String {
@@ -526,26 +740,29 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
 
 fn format_discord_message(summary: &CategorizedSummary) -> Vec<Value> {
     let mut categories = vec![
-        ("Agentic AI", &summary.agentic_ai),
-        ("Cloud Architecture", &summary.architecture_ai),
-        ("Programming", &summary.programming),
-        ("Tech Updates", &summary.tech_update),
-        ("Creator Insights", &summary.creator_insights),
+        ("Agentic AI", &summary.agentic_ai, false),
+        ("Cloud Architecture", &summary.architecture_ai, false),
+        ("Programming", &summary.programming, false),
+        ("Tech Updates", &summary.tech_update, false),
+        ("Creator Insights", &summary.creator_insights, true),
     ];
 
     if Local::now().weekday() == Weekday::Mon {
-        categories.push(("Certifications", &summary.certifications));
+        categories.push(("Certifications", &summary.certifications, false));
     }
 
     let mut embeds = Vec::new();
 
-    for (category_name, articles) in categories {
-        let is_creator_insights = category_name == "Creator Insights";
-        let description = if is_creator_insights {
-            format_creator_threads_description(articles)
-        } else {
-            format_embed_description(articles)
-        };
+    for (category_name, digest, is_creator_insights) in categories {
+        if digest.articles.len() < MIN_ARTICLES_PER_CATEGORY {
+            println!(
+                "Skipping {category_name}: only {} relevant articles",
+                digest.articles.len()
+            );
+            continue;
+        }
+
+        let description = format_category_digest_description(digest, is_creator_insights);
         let footer_text = if is_creator_insights {
             "Tech Radar • Creator Insights Digest"
         } else {
@@ -586,72 +803,95 @@ fn strip_json_code_fence(value: &str) -> String {
         .to_string()
 }
 
-fn format_embed_description(points: &[ArticleInfo]) -> String {
-    if points.is_empty() {
-        return "Tidak ada artikel baru yang relevan.".to_string();
-    }
-
-    points
+fn format_category_digest_description(
+    digest: &CategoryDigest,
+    is_creator_insights: bool,
+) -> String {
+    let summary = if digest.summary.trim().is_empty() {
+        "Belum ada ringkasan kategori yang cukup kuat."
+    } else {
+        digest.summary.trim()
+    };
+    let themes = format_key_themes(&digest.key_themes);
+    let articles = digest
+        .articles
         .iter()
-        .take(2)
-        .map(format_embed_article_item)
+        .take(MAX_ARTICLES_PER_CATEGORY)
+        .map(|article| format_digest_article_item(article, is_creator_insights))
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+
+    format!(
+        "🧠 **Summary**\n{summary}\n\n🔥 **Key Themes**\n{themes}\n\n📰 **Top Updates**\n\n{articles}"
+    )
 }
 
-fn format_embed_article_item(article: &ArticleInfo) -> String {
-    let title = if article.title.trim().is_empty() {
-        let summary_fallback = article.summary.trim();
+fn format_key_themes(themes: &[String]) -> String {
+    let selected_themes = themes
+        .iter()
+        .map(|theme| theme.trim())
+        .filter(|theme| !theme.is_empty())
+        .take(3)
+        .map(|theme| format!("• {theme}"))
+        .collect::<Vec<_>>();
 
-        if summary_fallback.is_empty() {
-            "Tanpa judul"
-        } else {
-            summary_fallback
+    if selected_themes.is_empty() {
+        "• No dominant themes identified".to_string()
+    } else {
+        selected_themes.join("\n")
+    }
+}
+
+fn format_digest_article_item(article: &ArticleInfo, is_creator_insights: bool) -> String {
+    let title = article_title(article, is_creator_insights);
+    let source = if article.source.trim().is_empty() {
+        "Unknown source"
+    } else {
+        article.source.trim()
+    };
+    let why_this_matters = if article.why_this_matters.trim().is_empty() {
+        "Relevant to AI and engineering strategy."
+    } else {
+        article.why_this_matters.trim()
+    };
+    let strategic_implication = article.strategic_implication.trim();
+    let link_label = if is_creator_insights {
+        "Read Thread"
+    } else {
+        "Read Article"
+    };
+    let title_line = if article.url.trim().is_empty() {
+        format!("**{title}**")
+    } else {
+        format!(
+            "**{title}** - [{link_label}]({})",
+            sanitize_markdown_url(&article.url)
+        )
+    };
+
+    if strategic_implication.is_empty() {
+        format!("{title_line}\nSource: {source}\nWhy this matters: {why_this_matters}")
+    } else {
+        format!(
+            "{title_line}\nSource: {source}\nWhy this matters: {why_this_matters}\nStrategic implication: {strategic_implication}"
+        )
+    }
+}
+
+fn article_title(article: &ArticleInfo, is_creator_insights: bool) -> String {
+    if is_creator_insights {
+        let hook_source = first_line_or_sentence(article.why_this_matters.trim());
+        let hook = hook_source.chars().take(60).collect::<String>();
+
+        if !hook.trim().is_empty() {
+            return format!("{}...", hook.trim());
         }
-    } else {
-        article.title.trim()
-    };
-
-    if article.url.trim().is_empty() {
-        format!("➡️ **{title}**")
-    } else {
-        format!(
-            "➡️ **{title}** - [Read Article]({})",
-            sanitize_markdown_url(&article.url)
-        )
-    }
-}
-
-fn format_creator_threads_description(points: &[ArticleInfo]) -> String {
-    if points.is_empty() {
-        return "Tidak ada thread baru yang relevan.".to_string();
     }
 
-    points
-        .iter()
-        .take(2)
-        .map(format_creator_thread_item)
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn format_creator_thread_item(article: &ArticleInfo) -> String {
-    let raw_post_content = article.summary.trim();
-    let hook_source = first_line_or_sentence(raw_post_content);
-    let hook = hook_source.chars().take(60).collect::<String>();
-    let hook = if hook.trim().is_empty() {
-        "Creator insight tanpa hook"
+    if article.title.trim().is_empty() {
+        "Untitled update".to_string()
     } else {
-        hook.trim()
-    };
-
-    if article.url.trim().is_empty() {
-        format!("➡️ **{hook}...**")
-    } else {
-        format!(
-            "➡️ **{hook}...** - [Read Thread]({})",
-            sanitize_markdown_url(&article.url)
-        )
+        article.title.trim().to_string()
     }
 }
 
