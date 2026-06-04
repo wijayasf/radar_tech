@@ -1,11 +1,3 @@
-use async_openai::{
-    Client as OpenAIClient,
-    config::OpenAIConfig,
-    types::chat::{
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs,
-    },
-};
 use chrono::{Datelike, Local, Weekday};
 use dotenv::dotenv;
 use reqwest::Client as HttpClient;
@@ -24,6 +16,7 @@ const ARTICLE_TEXT_LIMIT: usize = 5_000;
 const MAX_ARTICLES_PER_SESSION: usize = 8;
 const FEED_DELAY_SECONDS: u64 = 2;
 const OPENAI_DELAY_SECONDS: u64 = 5;
+const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const CERTIFICATION_WEEKDAY: Weekday = Weekday::Mon;
 const OPENAI_SYSTEM_PROMPT: &str = r#"Anda adalah analis teknologi. Ringkaslah artikel-artikel berikut ke dalam format JSON dengan tepat 6 kunci: "agentic_ai" (arsitektur/tren agen AI), "architecture_ai" (arsitektur AI baru), "programming" (bug dan update versi), "tech_update" (update teknologi umum: AI, cloud, dan programming), "creator_insights" (insight praktis, case study, atau kurasi dari creator teknologi), dan "certifications" (ujian, pelatihan, voucher, atau program sertifikasi). Setiap kategori harus berisi array objek dengan struktur {"title": "...", "summary": "...", "url": "..."}. Untuk agentic_ai, architecture_ai, programming, tech_update, dan creator_insights, berikan maksimal 2 artikel jika tersedia. Untuk certifications, hanya isi jika artikel membahas ujian, pelatihan, voucher, cohort, program belajar, atau sertifikasi yang relevan dengan region ASEAN/Indonesia; jika tidak relevan, gunakan array kosong. Contoh format: {"agentic_ai":[{"title":"...","summary":"...","url":"..."}],"architecture_ai":[{"title":"...","summary":"...","url":"..."}],"programming":[{"title":"...","summary":"...","url":"..."}],"tech_update":[{"title":"...","summary":"...","url":"..."}],"creator_insights":[{"title":"...","summary":"...","url":"..."}],"certifications":[{"title":"...","summary":"...","url":"..."}]}. Gunakan URL artikel asli yang diberikan. Jangan sertakan teks lain selain JSON tersebut."#;
 
@@ -167,7 +160,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let summary = summarize_articles_one_by_one(&openai_api_key, &new_articles).await?;
+    let summary =
+        summarize_articles_one_by_one(&http_client, &openai_api_key, &new_articles).await?;
     let discord_embeds = format_discord_message(&summary);
 
     send_to_discord(&http_client, &discord_webhook_url, &discord_embeds).await?;
