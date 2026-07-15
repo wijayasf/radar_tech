@@ -22,6 +22,8 @@ const OPENAI_SYSTEM_PROMPT: &str = r#"Anda adalah analis teknologi untuk Innovat
 
 Kategori JSON wajib: "agentic_ai", "architecture_ai", "programming", "tech_update", "creator_insights", dan "certifications".
 
+Catatan kategori: "agentic_ai" adalah key JSON internal untuk display category "AI Agents, Skills & Tools".
+
 Setiap kategori harus berupa objek:
 {
   "summary": "ringkasan eksekutif singkat yang mensintesis artikel teratas",
@@ -37,12 +39,56 @@ Setiap kategori harus berupa objek:
   ]
 }
 
+Definisi kategori "agentic_ai" / "AI Agents, Skills & Tools":
+- Masukkan artikel jika topik utamanya membahas autonomous atau semi-autonomous AI agents, AI coding agents, agent products, agent frameworks, agent orchestration, multi-agent systems, agent skills, plugins, MCP servers dan MCP tooling, tool use dan function calling untuk agents, agent memory dan context management, planning dan reflection, browser use dan computer use, human-in-the-loop agent workflows, agent evaluation dan observability, agent security dan governance, atau agent deployment dan infrastructure khusus agent workloads.
+- Known entity hints bukan whitelist. Gunakan nama berikut sebagai sinyal pendukung saja: Ponytail, Caveman, Hermes, .paul, Claude Code, Codex CLI, Cursor Agent, Replit Agent, Devin, GitHub Copilot Agents, LangGraph, CrewAI, AutoGen, OpenAI Agents SDK, Semantic Kernel, PydanticAI, smolagents, Agno, Mastra, MCP, Model Context Protocol, MCP Server, agent skills, agent plugins, tool-use frameworks, agent memory, dan agent evaluation.
+- Classifier harus tetap mengenali agent, framework, tool, skill, atau protocol baru berdasarkan capability dan konteks artikel meskipun nama entity tidak ada dalam daftar.
+
+Inclusion rules untuk "agentic_ai":
+- Topik utama adalah agent yang dapat merencanakan atau menjalankan task.
+- AI coding agent atau autonomous developer tool.
+- Framework untuk membangun atau mengorkestrasi agent.
+- Agent skill, plugin, MCP server, atau agent tool.
+- Memory, planning, reflection, tool selection, browser use, atau computer use untuk agent.
+- Multi-agent system.
+- Evaluation, observability, security, governance, atau deployment khusus AI agents.
+
+Exclusion rules untuk "agentic_ai":
+- Jangan masukkan model LLM baru tanpa agent capability.
+- Jangan masukkan chatbot sederhana tanpa planning atau tool use.
+- Jangan masukkan text generation atau summarization biasa.
+- Jangan masukkan programming language release.
+- Jangan masukkan developer tool tanpa autonomous atau semi-autonomous behavior.
+- Jangan masukkan cloud outage biasa atau cloud infrastructure umum.
+- Jangan masukkan generic AI funding atau acquisition news, kecuali agent technology adalah topik utama.
+- Jangan masukkan RAG framework yang hanya menyebut agent sebagai fitur opsional.
+- Jangan masukkan MCP yang hanya disebut sekilas dan bukan topik utama.
+
+Classification examples:
+- New AI coding agent that plans and executes repository changes -> agentic_ai.
+- New MCP server that allows agents to interact with databases -> agentic_ai.
+- Framework for multi-agent orchestration -> agentic_ai.
+- Marketplace for reusable agent skills -> agentic_ai.
+- Security platform specifically designed for autonomous agents -> agentic_ai.
+- Newly released product not present in known entity hints, but capable of planning, tool use, and autonomous execution -> agentic_ai.
+- New foundation model without agent capability -> not agentic_ai.
+- Cloud provider outage -> architecture_ai or tech_update.
+- Programming language version release -> programming.
+- Simple chatbot without planning or tool use -> not agentic_ai.
+- Generic AI startup funding -> tech_update unless agent technology is the primary subject.
+- IDE with autocomplete only -> programming.
+- IDE that autonomously plans, edits, tests, and iterates over a repository -> agentic_ai.
+- Cloud platform where an agent integration is only mentioned briefly -> architecture_ai.
+- Cloud platform launching infrastructure specifically for agent workloads -> agentic_ai or architecture_ai based on the primary subject.
+
 Ranking dan filtering:
-- Prioritaskan relevansi terhadap Agentic AI, MCP, AI engineering, Enterprise AI, LLM tooling, RAG, evaluation, AI infrastructure, cloud architecture, dan developer productivity.
+- Gunakan prinsip "Primary subject wins": artikel harus dimasukkan berdasarkan topik utamanya, bukan hanya karena terdapat satu keyword terkait agent.
+- Prioritaskan relevansi terhadap AI Agents, Skills & Tools, MCP, AI engineering, Enterprise AI, LLM tooling, RAG, evaluation, AI infrastructure, cloud architecture, dan developer productivity.
 - Urutkan berdasarkan relevansi AI/engineering, freshness, kualitas sumber, dan strategic importance untuk Innovation Engineer.
 - Targetkan 5 artikel per kategori.
 - Jika hanya tersedia 3 atau 4 artikel relevan, kembalikan 3 atau 4.
 - Jika kategori memiliki kurang dari 3 artikel relevan, kembalikan "articles": [], "summary": "", dan "key_themes": [].
+- Jangan duplikasi artikel yang sama di lebih dari satu kategori jika URL sama; pilih kategori paling sesuai dengan topik utama.
 - Jangan dump judul RSS mentah; sintetis dan ranking konten.
 - Untuk certifications, isi hanya jika ada ujian, pelatihan, voucher, cohort, program belajar, atau sertifikasi yang relevan dengan ASEAN/Indonesia.
 - Gunakan URL dan source asli dari input.
@@ -60,6 +106,7 @@ struct Article {
 #[derive(Debug, Deserialize)]
 struct CategorizedSummary {
     #[serde(default, deserialize_with = "deserialize_null_object_as_default")]
+    // Legacy/internal key for the "AI Agents, Skills & Tools" display category.
     agentic_ai: CategoryDigest,
     #[serde(default, deserialize_with = "deserialize_null_object_as_default")]
     architecture_ai: CategoryDigest,
@@ -134,16 +181,30 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("Workflow started");
 
     let openai_api_key = read_env("OPENAI_API_KEY")?;
-    let discord_webhook_url = read_env("DISCORD_WEBHOOK_URL")?;
+    let dry_run = env_flag_enabled("DRY_RUN");
+    let discord_webhook_url = if dry_run {
+        String::new()
+    } else {
+        read_env("DISCORD_WEBHOOK_URL")?
+    };
+    let runtime_fixture_articles = runtime_validation_fixture_articles();
     let processed_urls = read_processed_urls(PROCESSED_URLS_FILE)?;
     let http_client = HttpClient::new();
 
-    let collected_articles = collect_source_articles(&http_client).await?;
+    let collected_articles = if let Some(articles) = runtime_fixture_articles {
+        println!(
+            "Runtime validation fixture enabled with {} articles.",
+            articles.len()
+        );
+        articles
+    } else {
+        collect_source_articles(&http_client).await?
+    };
     let collected_articles_count = collected_articles.len();
     let mut new_articles = Vec::new();
 
     for article in collected_articles {
-        if processed_urls.contains(&article.url) {
+        if !dry_run && processed_urls.contains(&article.url) {
             println!(
                 "Lewati artikel yang sudah diproses dari {}: {}",
                 article.source_name, article.url
@@ -167,6 +228,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if new_articles.is_empty() {
         println!("Tidak ada artikel baru untuk diproses.");
+        if dry_run {
+            println!(
+                "DRY_RUN enabled: Discord fallback message was built but not sent, and processed_urls.txt was not updated."
+            );
+            log_final_summary(collected_articles_count, new_articles.len(), 0, "dry-run");
+            return Ok(());
+        }
+
         match send_discord_text(
             &http_client,
             &discord_webhook_url,
@@ -201,6 +270,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if discord_embeds.is_empty() {
         println!("No category reached minimum relevance threshold.");
+        if dry_run {
+            println!(
+                "DRY_RUN enabled: Discord fallback message was built but not sent, and processed_urls.txt was not updated."
+            );
+            log_runtime_validation_summary(&summary, &discord_embeds);
+            log_final_summary(
+                collected_articles_count,
+                new_articles.len(),
+                new_articles.len(),
+                "dry-run",
+            );
+            return Ok(());
+        }
+
         match send_discord_text(
             &http_client,
             &discord_webhook_url,
@@ -229,6 +312,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         append_processed_urls(PROCESSED_URLS_FILE, &new_articles)?;
+        return Ok(());
+    }
+
+    if dry_run {
+        println!(
+            "DRY_RUN enabled: Discord payload was built but not sent, and processed_urls.txt was not updated."
+        );
+        log_runtime_validation_summary(&summary, &discord_embeds);
+        log_final_summary(
+            collected_articles_count,
+            new_articles.len(),
+            new_articles.len(),
+            "dry-run",
+        );
         return Ok(());
     }
 
@@ -450,6 +547,124 @@ fn log_final_summary(
     println!("Final summary: total filtered = {total_filtered}");
     println!("Final summary: total analyzed = {total_analyzed}");
     println!("Final summary: discord delivery status = {discord_status}");
+}
+
+fn log_runtime_validation_summary(summary: &CategorizedSummary, embeds: &[Value]) {
+    println!("Runtime validation category counts:");
+    println!("agentic_ai = {}", summary.agentic_ai.articles.len());
+    println!(
+        "architecture_ai = {}",
+        summary.architecture_ai.articles.len()
+    );
+    println!("programming = {}", summary.programming.articles.len());
+    println!("tech_update = {}", summary.tech_update.articles.len());
+    println!(
+        "creator_insights = {}",
+        summary.creator_insights.articles.len()
+    );
+    println!("certifications = {}", summary.certifications.articles.len());
+    println!("Discord embeds built = {}", embeds.len());
+
+    for embed in embeds {
+        if let Some(title) = embed.get("title").and_then(Value::as_str) {
+            println!("Discord embed title: {title}");
+        }
+    }
+}
+
+fn env_flag_enabled(key: &str) -> bool {
+    env::var(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn runtime_validation_fixture_articles() -> Option<Vec<Article>> {
+    match env::var("TECH_RADAR_FIXTURE") {
+        Ok(value) if value.trim().eq_ignore_ascii_case("phase3") => {
+            Some(phase3_runtime_validation_articles())
+        }
+        _ => None,
+    }
+}
+
+fn phase3_runtime_validation_articles() -> Vec<Article> {
+    vec![
+        fixture_article(
+            "Ponytail introduces reusable skills for coding agents",
+            "https://example.com/phase3/ponytail-skills",
+            "Ponytail launched reusable skills that coding agents can select, execute, and share across repository workflows.",
+        ),
+        fixture_article(
+            "Caveman launches autonomous repository planning",
+            "https://example.com/phase3/caveman-planning",
+            "Caveman can inspect a repository, create an implementation plan, edit files, run checks, and iterate on failures.",
+        ),
+        fixture_article(
+            "A new MCP server connects agents to PostgreSQL",
+            "https://example.com/phase3/postgres-mcp",
+            "The MCP server exposes PostgreSQL database tools so agents can query schema, inspect data, and call database operations safely.",
+        ),
+        fixture_article(
+            "LangGraph introduces multi-agent orchestration",
+            "https://example.com/phase3/langgraph-orchestration",
+            "LangGraph added orchestration primitives for coordinating planner, executor, reviewer, and evaluator agents.",
+        ),
+        fixture_article(
+            "A marketplace launches reusable agent skills",
+            "https://example.com/phase3/agent-skill-marketplace",
+            "The marketplace distributes reusable agent skills and plugins for browser use, code editing, memory, and tool selection.",
+        ),
+        fixture_article(
+            "Unnamed product plans tasks, calls tools, executes changes, and evaluates output",
+            "https://example.com/phase3/unnamed-agent-tool",
+            "A newly released product can break down tasks, call tools, execute changes in external systems, and evaluate its own results.",
+        ),
+        fixture_article(
+            "A new foundation model is released without agent capability",
+            "https://example.com/phase3/foundation-model",
+            "The model improves benchmark scores for text generation and summarization, but does not include planning, tools, memory, or autonomous execution.",
+        ),
+        fixture_article(
+            "AWS experiences a regional outage",
+            "https://example.com/phase3/aws-outage",
+            "A regional cloud outage affected compute and storage services for several hours before recovery.",
+        ),
+        fixture_article(
+            "Rust releases a new compiler version",
+            "https://example.com/phase3/rust-compiler",
+            "The Rust compiler release includes diagnostics improvements, stabilizations, and performance updates.",
+        ),
+        fixture_article(
+            "A startup raises funding for a generic AI chatbot",
+            "https://example.com/phase3/chatbot-funding",
+            "The startup raised funding for a customer-support chatbot focused on answering questions without planning or tool use.",
+        ),
+        fixture_article(
+            "An IDE adds autocomplete only",
+            "https://example.com/phase3/ide-autocomplete",
+            "The IDE added faster AI autocomplete suggestions, but it does not plan tasks, edit multiple files autonomously, or run tools.",
+        ),
+        fixture_article(
+            "A RAG framework briefly mentions optional agent support",
+            "https://example.com/phase3/rag-framework",
+            "The framework focuses on retrieval pipelines and mentions optional agent support as a future integration.",
+        ),
+    ]
+}
+
+fn fixture_article(title: &str, url: &str, summary: &str) -> Article {
+    Article {
+        source_name: "Phase 3 Fixture".to_string(),
+        source_feed: "local-runtime-validation".to_string(),
+        title: title.to_string(),
+        url: url.to_string(),
+        summary: summary.to_string(),
+    }
 }
 
 fn read_env(key: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -708,7 +923,9 @@ fn extract_openai_response_text(response: &Value) -> Option<String> {
 }
 
 fn build_articles_prompt(articles: &[Article]) -> String {
-    let mut prompt = String::from("Artikel baru yang perlu dianalisis dan diranking:\n\n");
+    let mut prompt = String::from(
+        "Artikel baru yang perlu dianalisis dan diranking. Kembalikan hasil sebagai JSON sesuai instructions:\n\n",
+    );
 
     for (index, article) in articles.iter().enumerate() {
         let truncated_summary = truncate_text(&article.summary, ARTICLE_TEXT_LIMIT);
@@ -740,7 +957,7 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
 
 fn format_discord_message(summary: &CategorizedSummary) -> Vec<Value> {
     let mut categories = vec![
-        ("Agentic AI", &summary.agentic_ai, false),
+        ("AI Agents, Skills & Tools", &summary.agentic_ai, false),
         ("Cloud Architecture", &summary.architecture_ai, false),
         ("Programming", &summary.programming, false),
         ("Tech Updates", &summary.tech_update, false),
@@ -752,17 +969,21 @@ fn format_discord_message(summary: &CategorizedSummary) -> Vec<Value> {
     }
 
     let mut embeds = Vec::new();
+    let mut seen_urls = HashSet::new();
 
     for (category_name, digest, is_creator_insights) in categories {
-        if digest.articles.len() < MIN_ARTICLES_PER_CATEGORY {
+        let deduplicated_digest = filter_unique_category_articles(digest, &mut seen_urls);
+
+        if deduplicated_digest.articles.len() < MIN_ARTICLES_PER_CATEGORY {
             println!(
                 "Skipping {category_name}: only {} relevant articles",
-                digest.articles.len()
+                deduplicated_digest.articles.len()
             );
             continue;
         }
 
-        let description = format_category_digest_description(digest, is_creator_insights);
+        let description =
+            format_category_digest_description(&deduplicated_digest, is_creator_insights);
         let footer_text = if is_creator_insights {
             "Tech Radar • Creator Insights Digest"
         } else {
@@ -784,12 +1005,48 @@ fn format_discord_message(summary: &CategorizedSummary) -> Vec<Value> {
 
 fn category_color(category_name: &str) -> u32 {
     match category_name {
+        "AI Agents, Skills & Tools" => 46_714,
         "Agentic AI" => 46_714,
         "Cloud Architecture" => 39_423,
         "Programming" => 10_182_117,
         "Tech Updates" => 15_817_653,
         "Creator Insights" => 16_763_904,
         _ => 16_777_215,
+    }
+}
+
+fn filter_unique_category_articles(
+    digest: &CategoryDigest,
+    seen_urls: &mut HashSet<String>,
+) -> CategoryDigest {
+    let mut unique_digest = digest.clone();
+    unique_digest.articles = digest
+        .articles
+        .iter()
+        .filter(|article| insert_unique_article_url(article, seen_urls))
+        .cloned()
+        .collect();
+
+    unique_digest
+}
+
+fn insert_unique_article_url(article: &ArticleInfo, seen_urls: &mut HashSet<String>) -> bool {
+    let normalized_url = normalize_url_for_deduplication(&article.url);
+
+    if normalized_url.is_empty() {
+        return true;
+    }
+
+    seen_urls.insert(normalized_url)
+}
+
+fn normalize_url_for_deduplication(url: &str) -> String {
+    let without_fragment = url.trim().split('#').next().unwrap_or_default().trim();
+
+    if without_fragment.len() <= "https://".len() {
+        without_fragment.to_string()
+    } else {
+        without_fragment.trim_end_matches('/').to_string()
     }
 }
 
@@ -961,4 +1218,403 @@ async fn send_discord_text(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_article(title: &str, url: &str) -> ArticleInfo {
+        ArticleInfo {
+            title: title.to_string(),
+            source: "Test Source".to_string(),
+            url: url.to_string(),
+            why_this_matters: "Test relevance.".to_string(),
+            strategic_implication: "Test implication.".to_string(),
+        }
+    }
+
+    fn test_digest(summary: &str, articles: Vec<ArticleInfo>) -> CategoryDigest {
+        CategoryDigest {
+            summary: summary.to_string(),
+            key_themes: vec![
+                "Agent Development".to_string(),
+                "MCP & Tool Use".to_string(),
+                "Agent Security".to_string(),
+            ],
+            articles,
+        }
+    }
+
+    fn default_summary() -> CategorizedSummary {
+        CategorizedSummary {
+            agentic_ai: CategoryDigest::default(),
+            architecture_ai: CategoryDigest::default(),
+            programming: CategoryDigest::default(),
+            tech_update: CategoryDigest::default(),
+            creator_insights: CategoryDigest::default(),
+            certifications: CategoryDigest::default(),
+        }
+    }
+
+    fn embeds_as_text(embeds: &[Value]) -> String {
+        serde_json::to_string(embeds).expect("embeds should serialize")
+    }
+
+    #[test]
+    fn deserializes_legacy_agentic_ai_key() {
+        let payload = r#"{
+            "agentic_ai": {
+                "summary": "Agent tools are accelerating.",
+                "key_themes": ["Agent Development"],
+                "articles": [
+                    {
+                        "title": "New coding agent",
+                        "source": "Test Source",
+                        "url": "https://example.com/agent",
+                        "why_this_matters": "It can plan and execute changes.",
+                        "strategic_implication": "Teams need agent evaluation."
+                    }
+                ]
+            }
+        }"#;
+
+        let summary: CategorizedSummary =
+            serde_json::from_str(payload).expect("legacy key should deserialize");
+
+        assert_eq!(summary.agentic_ai.summary, "Agent tools are accelerating.");
+        assert_eq!(summary.agentic_ai.articles.len(), 1);
+        assert!(summary.programming.articles.is_empty());
+    }
+
+    #[test]
+    fn discord_embed_uses_ai_agents_display_name() {
+        let mut summary = default_summary();
+        summary.agentic_ai = test_digest(
+            "Agent products, frameworks, and skills are moving quickly.",
+            vec![
+                test_article("Agent story 1", "https://example.com/agent-1"),
+                test_article("Agent story 2", "https://example.com/agent-2"),
+                test_article("Agent story 3", "https://example.com/agent-3"),
+            ],
+        );
+
+        let embeds = format_discord_message(&summary);
+        let first_title = embeds[0]["title"].as_str().expect("title should exist");
+
+        assert!(first_title.contains("AI Agents, Skills & Tools"));
+        assert!(!first_title.contains("Agentic AI"));
+    }
+
+    #[test]
+    fn ai_agents_category_color_is_not_fallback() {
+        assert_ne!(
+            category_color("AI Agents, Skills & Tools"),
+            category_color("Unknown Category")
+        );
+        assert_eq!(
+            category_color("AI Agents, Skills & Tools"),
+            category_color("Agentic AI")
+        );
+    }
+
+    #[test]
+    fn cross_category_deduplication_keeps_highest_priority_category() {
+        let mut summary = default_summary();
+        summary.agentic_ai = test_digest(
+            "Agents first.",
+            vec![
+                test_article("Agent Deep Dive", "https://example.com/shared-agent"),
+                test_article("Agent unique 1", "https://example.com/agent-unique-1"),
+                test_article("Agent unique 2", "https://example.com/agent-unique-2"),
+            ],
+        );
+        summary.programming = test_digest(
+            "Programming duplicate.",
+            vec![
+                test_article(
+                    "Programming Duplicate",
+                    " https://example.com/shared-agent/ ",
+                ),
+                test_article("Programming unique 1", "https://example.com/programming-1"),
+                test_article("Programming unique 2", "https://example.com/programming-2"),
+            ],
+        );
+        summary.tech_update = test_digest(
+            "Tech duplicate.",
+            vec![
+                test_article("Tech Duplicate", "https://example.com/shared-agent#section"),
+                test_article("Tech unique 1", "https://example.com/tech-1"),
+                test_article("Tech unique 2", "https://example.com/tech-2"),
+            ],
+        );
+
+        let rendered = embeds_as_text(&format_discord_message(&summary));
+
+        assert!(rendered.contains("AI Agents, Skills & Tools"));
+        assert!(rendered.contains("Agent Deep Dive"));
+        assert!(!rendered.contains("Programming Duplicate"));
+        assert!(!rendered.contains("Tech Duplicate"));
+        assert_eq!(rendered.matches("shared-agent").count(), 1);
+    }
+
+    #[test]
+    fn unique_articles_remain_in_their_categories() {
+        let mut summary = default_summary();
+        summary.agentic_ai = test_digest(
+            "Agents.",
+            vec![
+                test_article("Agent unique 1", "https://example.com/agent-a"),
+                test_article("Agent unique 2", "https://example.com/agent-b"),
+                test_article("Agent unique 3", "https://example.com/agent-c"),
+            ],
+        );
+        summary.programming = test_digest(
+            "Programming.",
+            vec![
+                test_article("Programming unique 1", "https://example.com/programming-a"),
+                test_article("Programming unique 2", "https://example.com/programming-b"),
+                test_article("Programming unique 3", "https://example.com/programming-c"),
+            ],
+        );
+
+        let rendered = embeds_as_text(&format_discord_message(&summary));
+
+        assert!(rendered.contains("AI Agents, Skills & Tools"));
+        assert!(rendered.contains("Programming"));
+        assert!(rendered.contains("Agent unique 1"));
+        assert!(rendered.contains("Programming unique 1"));
+    }
+
+    #[test]
+    fn normalizes_urls_for_safe_deduplication() {
+        assert_eq!(
+            normalize_url_for_deduplication(" https://example.com/path/ "),
+            "https://example.com/path"
+        );
+        assert_eq!(
+            normalize_url_for_deduplication("https://example.com/path#comments"),
+            "https://example.com/path"
+        );
+
+        let mut seen_urls = HashSet::new();
+        assert!(insert_unique_article_url(
+            &test_article("Original", "https://example.com/path"),
+            &mut seen_urls
+        ));
+        assert!(!insert_unique_article_url(
+            &test_article("Duplicate", " https://example.com/path/#comments "),
+            &mut seen_urls
+        ));
+    }
+
+    #[test]
+    fn phase3_runtime_fixture_contains_expected_article_inputs() {
+        let articles = phase3_runtime_validation_articles();
+        let titles = articles
+            .iter()
+            .map(|article| article.title.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(articles.len(), 12);
+        assert!(titles.contains(&"Ponytail introduces reusable skills for coding agents"));
+        assert!(titles.contains(&"Caveman launches autonomous repository planning"));
+        assert!(titles.contains(&"A new MCP server connects agents to PostgreSQL"));
+        assert!(titles.contains(&"LangGraph introduces multi-agent orchestration"));
+        assert!(titles.contains(&"A marketplace launches reusable agent skills"));
+        assert!(titles.contains(
+            &"Unnamed product plans tasks, calls tools, executes changes, and evaluates output"
+        ));
+        assert!(titles.contains(&"A new foundation model is released without agent capability"));
+        assert!(titles.contains(&"AWS experiences a regional outage"));
+        assert!(titles.contains(&"Rust releases a new compiler version"));
+        assert!(titles.contains(&"A startup raises funding for a generic AI chatbot"));
+        assert!(titles.contains(&"An IDE adds autocomplete only"));
+        assert!(titles.contains(&"A RAG framework briefly mentions optional agent support"));
+    }
+
+    #[test]
+    fn phase3_fixture_payload_validates_display_deduplication_and_limits() {
+        let mut summary = default_summary();
+        summary.agentic_ai = test_digest(
+            "Agent products, frameworks, skills, MCP, and tooling are expanding.",
+            vec![
+                test_article(
+                    "Ponytail introduces reusable skills for coding agents",
+                    "https://example.com/phase3/ponytail-skills",
+                ),
+                test_article(
+                    "Caveman launches autonomous repository planning",
+                    "https://example.com/phase3/caveman-planning",
+                ),
+                test_article(
+                    "A new MCP server connects agents to PostgreSQL",
+                    "https://example.com/phase3/postgres-mcp",
+                ),
+                test_article(
+                    "LangGraph introduces multi-agent orchestration",
+                    "https://example.com/phase3/langgraph-orchestration",
+                ),
+                test_article(
+                    "A marketplace launches reusable agent skills",
+                    "https://example.com/phase3/agent-skill-marketplace",
+                ),
+                test_article(
+                    "Unnamed product plans tasks, calls tools, executes changes, and evaluates output",
+                    "https://example.com/phase3/unnamed-agent-tool",
+                ),
+            ],
+        );
+        summary.programming = test_digest(
+            "Programming and IDE updates.",
+            vec![
+                test_article(
+                    "Rust releases a new compiler version",
+                    "https://example.com/phase3/rust-compiler",
+                ),
+                test_article(
+                    "An IDE adds autocomplete only",
+                    "https://example.com/phase3/ide-autocomplete",
+                ),
+                test_article(
+                    "Duplicate MCP story in programming",
+                    "https://example.com/phase3/postgres-mcp#discussion",
+                ),
+            ],
+        );
+        summary.tech_update = test_digest(
+            "General tech updates.",
+            vec![
+                test_article(
+                    "A new foundation model is released without agent capability",
+                    "https://example.com/phase3/foundation-model",
+                ),
+                test_article(
+                    "A startup raises funding for a generic AI chatbot",
+                    "https://example.com/phase3/chatbot-funding",
+                ),
+                test_article(
+                    "Duplicate agent marketplace story",
+                    " https://example.com/phase3/agent-skill-marketplace/ ",
+                ),
+            ],
+        );
+
+        let embeds = format_discord_message(&summary);
+        let rendered = embeds_as_text(&embeds);
+        let agent_embed = embeds
+            .iter()
+            .find(|embed| {
+                embed["title"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("AI Agents, Skills & Tools")
+            })
+            .expect("agent embed should render with at least three articles");
+        let description = agent_embed["description"]
+            .as_str()
+            .expect("description should exist");
+
+        assert_eq!(
+            agent_embed["title"].as_str(),
+            Some("📰 LINE TECH NEWS | AI Agents, Skills & Tools")
+        );
+        assert!(description.contains("🧠 **Summary**"));
+        assert!(description.contains("🔥 **Key Themes**"));
+        assert!(description.contains("📰 **Top Updates**"));
+        assert!(description.contains("Source: Test Source"));
+        assert!(description.contains("Why this matters: Test relevance."));
+        assert!(description.contains("Strategic implication: Test implication."));
+        assert_eq!(
+            agent_embed["footer"]["text"].as_str(),
+            Some("Tech Radar • Morning Digest")
+        );
+        assert!(!rendered.contains("LINE TECH NEWS | Agentic AI"));
+        assert!(!rendered.contains("Duplicate MCP story in programming"));
+        assert!(!rendered.contains("Duplicate agent marketplace story"));
+        assert!(!description.contains("Unnamed product plans tasks"));
+        assert_eq!(
+            description.matches("Read Article").count(),
+            MAX_ARTICLES_PER_CATEGORY
+        );
+    }
+
+    #[test]
+    fn existing_categories_keep_unique_articles_after_deduplication() {
+        let mut summary = default_summary();
+        summary.agentic_ai = test_digest(
+            "Agents.",
+            vec![
+                test_article("Agent 1", "https://example.com/regression/agent-1"),
+                test_article("Agent 2", "https://example.com/regression/agent-2"),
+                test_article("Agent 3", "https://example.com/regression/agent-3"),
+            ],
+        );
+        summary.architecture_ai = test_digest(
+            "Cloud architecture.",
+            vec![
+                test_article("Cloud 1", "https://example.com/regression/cloud-1"),
+                test_article("Cloud 2", "https://example.com/regression/cloud-2"),
+                test_article("Cloud 3", "https://example.com/regression/cloud-3"),
+            ],
+        );
+        summary.programming = test_digest(
+            "Programming.",
+            vec![
+                test_article(
+                    "Programming 1",
+                    "https://example.com/regression/programming-1",
+                ),
+                test_article(
+                    "Programming 2",
+                    "https://example.com/regression/programming-2",
+                ),
+                test_article(
+                    "Programming 3",
+                    "https://example.com/regression/programming-3",
+                ),
+            ],
+        );
+        summary.tech_update = test_digest(
+            "Tech.",
+            vec![
+                test_article("Tech 1", "https://example.com/regression/tech-1"),
+                test_article("Tech 2", "https://example.com/regression/tech-2"),
+                test_article("Tech 3", "https://example.com/regression/tech-3"),
+            ],
+        );
+        summary.creator_insights = test_digest(
+            "Creators.",
+            vec![
+                test_article("Creator 1", "https://example.com/regression/creator-1"),
+                test_article("Creator 2", "https://example.com/regression/creator-2"),
+                test_article("Creator 3", "https://example.com/regression/creator-3"),
+            ],
+        );
+        summary.certifications = test_digest(
+            "Certifications.",
+            vec![
+                test_article("Certification 1", "https://example.com/regression/cert-1"),
+                test_article("Certification 2", "https://example.com/regression/cert-2"),
+                test_article("Certification 3", "https://example.com/regression/cert-3"),
+            ],
+        );
+
+        let rendered = embeds_as_text(&format_discord_message(&summary));
+
+        assert!(rendered.contains("Cloud Architecture"));
+        assert!(rendered.contains("Programming"));
+        assert!(rendered.contains("Tech Updates"));
+        assert!(rendered.contains("Creator Insights"));
+        assert!(rendered.contains("Cloud 1"));
+        assert!(rendered.contains("Programming 1"));
+        assert!(rendered.contains("Tech 1"));
+        assert!(rendered.contains("Creator"));
+
+        if Local::now().weekday() == Weekday::Mon {
+            assert!(rendered.contains("Certifications"));
+        } else {
+            assert!(!rendered.contains("Certifications"));
+        }
+    }
 }
